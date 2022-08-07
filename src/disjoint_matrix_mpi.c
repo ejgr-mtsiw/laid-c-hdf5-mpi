@@ -19,6 +19,7 @@
 #include "utils/bit.h"
 #include "utils/block.h"
 #include "utils/math.h"
+#include "utils/timing.h"
 
 #include "hdf5.h"
 
@@ -74,8 +75,7 @@ oknok_t mpi_create_line_dataset(const dataset_hdf5_t* hdf5_dset,
 	word_t* buffer = (word_t*) malloc(sizeof(word_t) * dset->n_words);
 	assert(buffer != NULL);
 
-	// This process will write this many lines
-	steps_t* s	   = dm->steps;
+	steps_t* s	   = dm->steps + dm->s_offset;
 	steps_t* s_end = s + dm->s_size;
 
 	// Allocate line totals buffer
@@ -87,12 +87,16 @@ oknok_t mpi_create_line_dataset(const dataset_hdf5_t* hdf5_dset,
 
 	for (; s < s_end; s++, cl++)
 	{
+
+		// Build one line
 		word_t* la = dset->data + (s->indexA * dset->n_words);
 		word_t* lb = dset->data + (s->indexB * dset->n_words);
 
 		for (uint32_t n = 0; n < dset->n_words; n++)
 		{
 			buffer[n] = la[n] ^ lb[n];
+
+			// Update line total
 			lt_buffer[cl] += __builtin_popcountl(buffer[n]);
 		}
 
@@ -143,6 +147,101 @@ oknok_t mpi_create_line_dataset(const dataset_hdf5_t* hdf5_dset,
 	return OK;
 }
 
+oknok_t mpi_read_one_column(const dataset_hdf5_t* hdf5_dset, const dm_t* dm,
+							const int rank, word_t* buffer)
+{
+
+	// Create a dataset access property list
+	hid_t dapl_id = H5Pcreate(H5P_DATASET_ACCESS);
+	assert(dapl_id != NOK);
+
+	hid_t dset_id = H5Dopen2(hdf5_dset->file_id, DM_LINE_DATA, dapl_id);
+	assert(dset_id != NOK);
+
+	hid_t filespace_id = H5Dget_space(dset_id);
+	assert(filespace_id != NOK);
+
+	// We're reading one column at once
+	hsize_t mem_dimensions[2] = { dm->n_matrix_lines, 1 };
+
+	// Create a memory dataspace to indicate the size of our buffer/chunk
+	hid_t memspace_id = H5Screate_simple(2, mem_dimensions, NULL);
+	assert(memspace_id != NOK);
+
+	hsize_t offset[2] = { 0, rank };
+	hsize_t count[2]  = { dm->n_matrix_lines, 1 };
+
+	H5Sselect_hyperslab(filespace_id, H5S_SELECT_SET, offset, NULL, count,
+						NULL);
+
+	H5Dread(dset_id, H5T_NATIVE_ULONG, memspace_id, filespace_id, H5P_DEFAULT,
+			buffer);
+
+	H5Sclose(memspace_id);
+	H5Sclose(filespace_id);
+	H5Dclose(dset_id);
+
+	return OK;
+}
+
+oknok_t mpi_read_one_line(const dataset_hdf5_t* hdf5_dset,
+						  const dataset_t* dset, const int rank,
+						  word_t* buffer)
+{
+
+	// Create a dataset access property list
+	hid_t dapl_id = H5Pcreate(H5P_DATASET_ACCESS);
+	assert(dapl_id != NOK);
+
+	hid_t dset_id = H5Dopen2(hdf5_dset->file_id, DM_LINE_DATA, dapl_id);
+	assert(dset_id != NOK);
+
+	hid_t filespace_id = H5Dget_space(dset_id);
+	assert(filespace_id != NOK);
+
+	// We're reading one column at once
+	hsize_t mem_dimensions[2] = { 1, dset->n_words };
+
+	// Create a memory dataspace to indicate the size of our buffer/chunk
+	hid_t memspace_id = H5Screate_simple(2, mem_dimensions, NULL);
+	assert(memspace_id != NOK);
+
+	hsize_t offset[2] = { rank, 0 };
+	hsize_t count[2]  = { 1, dset->n_words };
+
+	H5Sselect_hyperslab(filespace_id, H5S_SELECT_SET, offset, NULL, count,
+						NULL);
+
+	H5Dread(dset_id, H5T_NATIVE_ULONG, memspace_id, filespace_id, H5P_DEFAULT,
+			buffer);
+
+	H5Sclose(memspace_id);
+	H5Sclose(filespace_id);
+	H5Dclose(dset_id);
+
+	return OK;
+}
+
+oknok_t mpi_calculate_one_column(const dataset_t* dset, const dm_t* dm,
+								 const int rank, word_t* buffer)
+{
+
+	word_t* current_buffer = buffer;
+
+	steps_t* s	   = dm->steps;
+	steps_t* s_end = s + dm->n_matrix_lines;
+
+	for (; s < s_end; s++)
+	{
+		word_t* la = dset->data + (s->indexA * dset->n_words) + rank;
+		word_t* lb = dset->data + (s->indexB * dset->n_words) + rank;
+
+		*current_buffer = *la ^ *lb;
+		current_buffer++;
+	}
+	return OK;
+}
+
 oknok_t mpi_create_column_dataset(const dataset_hdf5_t* hdf5_dset,
 								  const dataset_t* dset, const dm_t* dm,
 								  const int rank, const int size)
@@ -152,7 +251,7 @@ oknok_t mpi_create_column_dataset(const dataset_hdf5_t* hdf5_dset,
 		+ (dm->n_matrix_lines % WORD_BITS != 0);
 
 	// Round to nearest 64 so we don't have to worry when transposing
-	uint32_t out_n_lines = roundUp(dset->n_attributes, 64);
+	uint32_t out_n_lines = roundUp(dset->n_attributes, WORD_BITS);
 
 	// CREATE OUTPUT DATASET
 	// Output dataset dimensions
@@ -356,6 +455,8 @@ oknok_t mpi_write_line_totals(const dataset_hdf5_t* hdf5_dset, const dm_t* dm,
 	hid_t memspace_id		  = H5Screate_simple(2, mem_dimensions, NULL);
 	assert(memspace_id != NOK);
 
+	// This is only needed if we're saving collectively,
+	// because all processes must participate in the operation
 	if (dm->s_size == 0)
 	{
 		// Nothing to save

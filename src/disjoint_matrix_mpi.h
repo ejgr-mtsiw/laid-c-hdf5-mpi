@@ -15,6 +15,14 @@
 #include "types/oknok_t.h"
 
 #include <stdint.h>
+oknok_t mpi_read_one_line(const dataset_hdf5_t* hdf5_dset, const dataset_t *dset,
+						  const int rank, word_t* buffer);
+
+oknok_t mpi_read_one_column(const dataset_hdf5_t* hdf5_dset, const dm_t* dm,
+							const int rank, word_t* buffer);
+
+oknok_t mpi_calculate_one_column(const dataset_t* dset, const dm_t* dm,
+								 const int rank, word_t* buffer);
 
 /**
  * Creates the dataset containing the disjoint matrix with attributes as columns
