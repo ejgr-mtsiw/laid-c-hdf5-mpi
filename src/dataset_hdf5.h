@@ -1,6 +1,6 @@
 /*
  ============================================================================
- Name        : hdf5_dataset.h
+ Name        : dataset_hdf5.h
  Author      : Eduardo Ribeiro
  Description : Structures and functions to manage hdf5 datasets
  ============================================================================
@@ -9,8 +9,8 @@
 #ifndef HDF5_DATASET_H
 #define HDF5_DATASET_H
 
+#include "types/dataset_hdf5_t.h"
 #include "types/dataset_t.h"
-#include "types/hdf5_dataset_t.h"
 #include "types/oknok_t.h"
 
 #include "hdf5.h"
@@ -70,18 +70,6 @@ bool hdf5_dataset_exists(const hid_t file_id, const char* dataset);
 bool hdf5_file_has_dataset(const char* filename, const char* datasetname);
 
 /**
- * Opens the file and dataset indicated
- */
-oknok_t hdf5_open_dataset(hdf5_dataset_t* dataset, const char* filename,
-						  const char* datasetname);
-
-/**
- * Fills the dataset structure
- */
-oknok_t hdf5_read_dataset(const char* filename, const char* datasetname,
-						  dataset_t* dataset);
-
-/**
  * Reads the dataset attributes from the hdf5 file
  */
 oknok_t hdf5_read_dataset_attributes(hid_t dataset_id, dataset_t* dataset);
@@ -95,14 +83,20 @@ oknok_t hdf5_read_attribute(hid_t dataset_id, const char* attribute,
 /**
  * Reads the entire dataset data from the hdf5 file
  */
-oknok_t hdf5_read_data(hid_t dataset_id, dataset_t* dataset);
+oknok_t hdf5_read_dataset_data(hid_t dataset_id, word_t* data);
 
 /**
- * Reads n_words from index line in the dataset and stores it in the
- * line parameter
+ * Retrieves a line from the dataset
  */
-oknok_t hdf5_read_line(const hdf5_dataset_t* dataset, const uint32_t index,
+oknok_t hdf5_read_line(const dataset_hdf5_t* dataset, const uint32_t index,
 					   const uint32_t n_words, word_t* line);
+
+/**
+ * Reads n lines from the dataset
+ */
+oknok_t hdf5_read_lines(const dataset_hdf5_t* dataset, const uint32_t index,
+						const uint32_t n_words, const uint32_t n_lines,
+						word_t* lines);
 /**
  * Writes an attribute to the dataset
  */
@@ -110,18 +104,13 @@ oknok_t hdf5_write_attribute(hid_t dataset_id, const char* attribute,
 							 hid_t datatype, const void* value);
 
 /**
- * Reads chunk dimensions from dataset if chunking was enabled
- */
-int hdf5_get_chunk_dimensions(const hid_t dataset_id,
-							  hsize_t* chunk_dimensions);
-
-/**
  * Returns the dataset dimensions stored in the hdf5 dataset
  */
 void hdf5_get_dataset_dimensions(hid_t dataset_id, hsize_t* dataset_dimensions);
+
 /**
  * Free resources and closes open connections
  */
-void hdf5_close_dataset(hdf5_dataset_t* dataset);
+void hdf5_close_dataset(dataset_hdf5_t* dataset);
 
 #endif
