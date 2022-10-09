@@ -20,12 +20,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-bool hdf5_dataset_exists(const hid_t file_id, const char* datasetname)
-{
-	return (H5Lexists(file_id, datasetname, H5P_DEFAULT) > 0);
-}
-
-bool hdf5_file_has_dataset(const char* filename, const char* datasetname)
+oknok_t hdf5_open_dataset(const char* filename, const char* datasetname,
+						  dataset_hdf5_t* dataset)
 {
 	// Open the data file
 	hid_t file_id = H5Fopen(filename, H5F_ACC_RDONLY, H5P_DEFAULT);
@@ -33,14 +29,24 @@ bool hdf5_file_has_dataset(const char* filename, const char* datasetname)
 	{
 		// Error creating file
 		fprintf(stderr, "Error opening file %s\n", filename);
-		return false;
+		return NOK;
 	}
 
-	bool exists = hdf5_dataset_exists(file_id, datasetname);
+	// Open input dataset
+	hid_t dataset_id = H5Dopen(file_id, datasetname, H5P_DEFAULT);
+	if (dataset_id < 1)
+	{
+		// Error opening dataset
+		fprintf(stderr, "Dataset %s not found!\n", datasetname);
+		H5Fclose(file_id);
+		return NOK;
+	}
 
-	H5Fclose(file_id);
+	dataset->file_id	= file_id;
+	dataset->dataset_id = dataset_id;
+	hdf5_get_dataset_dimensions(dataset_id, dataset->dimensions);
 
-	return exists;
+	return OK;
 }
 
 oknok_t hdf5_read_dataset_attributes(hid_t dataset_id, dataset_t* dataset)
@@ -148,82 +154,6 @@ oknok_t hdf5_read_dataset_data(hid_t dataset_id, word_t* data)
 		fprintf(stderr, "Error reading the dataset data\n");
 
 		data = NULL;
-		return NOK;
-	}
-
-	return OK;
-}
-
-oknok_t hdf5_read_line(const dataset_hdf5_t* dataset, const uint32_t index,
-					   const uint32_t n_words, word_t* line)
-{
-	return hdf5_read_lines(dataset, index, n_words, 1, line);
-}
-
-oknok_t hdf5_read_lines(const dataset_hdf5_t* dataset, const uint32_t index,
-						const uint32_t n_words, const uint32_t n_lines,
-						word_t* lines)
-{
-	// Setup offset
-	hsize_t offset[2] = { index, 0 };
-	// Setup count
-	hsize_t count[2] = { n_lines, n_words };
-
-	const hsize_t dimensions[2] = { n_lines, n_words };
-
-	// Create a memory dataspace to indicate the size of our buffer/chunk
-	hid_t memspace_id = H5Screate_simple(2, dimensions, NULL);
-
-	// Setup line dataspace
-	hid_t dataspace_id = H5Dget_space(dataset->dataset_id);
-
-	// Select hyperslab on file dataset
-	H5Sselect_hyperslab(dataspace_id, H5S_SELECT_SET, offset, NULL, count,
-						NULL);
-
-	// Read line from dataset
-	H5Dread(dataset->dataset_id, H5T_NATIVE_ULONG, memspace_id, dataspace_id,
-			H5P_DEFAULT, lines);
-
-	H5Sclose(dataspace_id);
-	H5Sclose(memspace_id);
-
-	return OK;
-}
-
-oknok_t hdf5_write_attribute(hid_t dataset_id, const char* attribute,
-							 hid_t datatype, const void* value)
-{
-	hid_t attr_dataspace = H5Screate(H5S_SCALAR);
-	hid_t attr = H5Acreate(dataset_id, attribute, datatype, attr_dataspace,
-						   H5P_DEFAULT, H5P_DEFAULT);
-	if (attr < 0)
-	{
-		fprintf(stderr, "Error cretaing attribute %s.\n", attribute);
-		return NOK;
-	}
-
-	// Write the attribute to the dataset
-	herr_t status = H5Awrite(attr, datatype, value);
-	if (status < 0)
-	{
-		fprintf(stderr, "Error writing attribute %s.\n", attribute);
-		return NOK;
-	}
-
-	// Close the attribute.
-	status = H5Aclose(attr);
-	if (status < 0)
-	{
-		fprintf(stderr, "Error closing attribute %s.\n", attribute);
-		return NOK;
-	}
-
-	// Close the dataspace.
-	status = H5Sclose(attr_dataspace);
-	if (status < 0)
-	{
-		fprintf(stderr, "Error closing attribute %s datatspace.\n", attribute);
 		return NOK;
 	}
 
