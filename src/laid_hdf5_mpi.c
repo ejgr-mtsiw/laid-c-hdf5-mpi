@@ -15,7 +15,6 @@
 #include "types/dataset_hdf5_t.h"
 #include "types/dataset_t.h"
 #include "types/dm_t.h"
-#include "types/steps_t.h"
 #include "types/word_t.h"
 #include "utils/bit.h"
 #include "utils/block.h"
@@ -153,10 +152,11 @@ int main(int argc, char** argv)
 	/**
 	 * Timing for the full operation
 	 */
-	struct timespec main_tick, main_tock;
+	time_t main_tick = 0, main_tock = 0;
 	if (rank == 0)
 	{
-		clock_gettime(CLOCK_MONOTONIC_RAW, &main_tick);
+		// Timing for the full operation
+		main_tick = time(0);
 	}
 
 	/**
@@ -257,6 +257,35 @@ int main(int argc, char** argv)
 		// Fill class arrays
 		fprintf(stdout, "- Checking classes: ");
 
+		// Number of classes
+		uint32_t nc = dataset.n_classes;
+
+		// Number of observations
+		uint32_t no = dataset.n_observations;
+
+		/**
+		 * Array that stores the number of observations for each class
+		 */
+		uint32_t* n_opc = (uint32_t*) calloc(nc, sizeof(uint32_t));
+		if (n_opc == NULL)
+		{
+			fprintf(stderr, "Error allocating n_observations_per_class\n");
+			return NOK;
+		}
+
+		/**
+		 * Matrix that stores the list of observations per class
+		 */
+		uint32_t* opc = (uint32_t*) calloc(nc * no, sizeof(uint32_t*));
+		if (opc == NULL)
+		{
+			fprintf(stderr, "Error allocating observations_per_class\n");
+			return NOK;
+		}
+
+		dataset.n_observations_per_class = n_opc;
+		dataset.observations_per_class	 = opc;
+
 		if (fill_class_arrays(&dataset) != OK)
 		{
 			return EXIT_FAILURE;
@@ -264,10 +293,9 @@ int main(int argc, char** argv)
 
 		TOCK(stdout);
 
-		for (unsigned int i = 0; i < dataset.n_classes; i++)
+		for (uint32_t i = 0; i < nc; i++)
 		{
-			fprintf(stdout, " - class %d: %d item(s)\n", i,
-					dataset.n_observations_per_class[i]);
+			fprintf(stdout, " - class %d: %d item(s)\n", i, n_opc[i]);
 		}
 
 		TICK;
@@ -280,81 +308,16 @@ int main(int argc, char** argv)
 		fprintf(stdout, " - Max JNSQ: %d [%d bits] ", max_jnsq,
 				dataset.n_bits_for_jnsqs);
 		TOCK(stdout);
-	}
 
-	// End setup dataset
-	// MPI_Barrier(node_comm);
-
-	dm.n_matrix_lines = 0;
-	if (node_rank == 0)
-	{
-		dm.n_matrix_lines = get_dm_n_lines(&dataset);
-	}
-
-	steps_t* localsteps		 = NULL;
-	MPI_Win win_shared_steps = MPI_WIN_NULL;
-	MPI_Win_allocate_shared(dm.n_matrix_lines * sizeof(steps_t),
-							sizeof(steps_t), MPI_INFO_NULL, node_comm,
-							&localsteps, &win_shared_steps);
-
-	/**
-	 * The steps
-	 */
-	steps_t* steps = NULL;
-
-	// Set dataset data pointer
-	if (node_rank == 0)
-	{
-		steps = localsteps;
-	}
-	else
-	{
-		MPI_Aint win_size;
-		int win_disp;
-		MPI_Win_shared_query(win_shared_steps, 0, &win_size, &win_disp, &steps);
-	}
-	// All table pointers should now point to copy on noderank 0
-
-	// Setup steps
-	if (node_rank == 0)
-	{
 		TICK;
+		fprintf(stdout, "- Sorting dataset by class:\n");
+		// Sort by class
+		sort_dataset_by_class(&dataset);
 
-		fprintf(stdout, "- Generating matrix steps\n");
-
-		uint32_t nc	   = dataset.n_classes;
-		uint32_t no	   = dataset.n_observations;
-		uint32_t* opc  = dataset.observations_per_class;
-		uint32_t* nopc = dataset.n_observations_per_class;
-
-		// DO IT
-		uint32_t cs = 0;
-
-		for (uint32_t ca = 0; ca < nc - 1; ca++)
-		{
-			for (uint32_t ia = 0; ia < nopc[ca]; ia++)
-			{
-				for (uint32_t cb = ca + 1; cb < nc; cb++)
-				{
-					for (uint32_t ib = 0; ib < nopc[cb]; ib++)
-					{
-						steps[cs].indexA = opc[ca * no + ia];
-						steps[cs].indexB = opc[cb * no + ib];
-
-						cs++;
-					}
-				}
-			}
-		}
-
-		free(dataset.n_observations_per_class);
 		free(dataset.observations_per_class);
+		dataset.observations_per_class = NULL;
 
-		dataset.n_observations_per_class = NULL;
-		dataset.observations_per_class	 = NULL;
-
-		fprintf(stdout, " - Finished generating %d matrix steps ",
-				dm.n_matrix_lines);
+		fprintf(stdout, " - Finished sorting dataset");
 		TOCK(stdout);
 	}
 
@@ -363,39 +326,57 @@ int main(int argc, char** argv)
 		fprintf(stdout, "- Broadcasting attributes\n");
 	}
 
-	uint64_t toshare[4];
+	uint32_t toshare[5];
 	if (node_rank == 0)
 	{
-		toshare[0] = dataset.n_attributes;
-		toshare[1] = dataset.n_observations;
-		toshare[2] = dataset.n_words;
-		toshare[3] = dm.n_matrix_lines;
+		dm.n_matrix_lines = get_dm_n_lines(&dataset);
 
-		MPI_Bcast(&toshare, 4, MPI_UINT64_T, 0, node_comm);
+		toshare[0] = dataset.n_classes;
+		toshare[1] = dataset.n_attributes;
+		toshare[2] = dataset.n_observations;
+		toshare[3] = dataset.n_words;
+		toshare[4] = dm.n_matrix_lines;
+
+		MPI_Bcast(&toshare, 5, MPI_UINT32_T, 0, node_comm);
 	}
 	else
 	{
-		MPI_Bcast(&toshare, 4, MPI_UINT64_T, 0, node_comm);
+		MPI_Bcast(&toshare, 5, MPI_UINT32_T, 0, node_comm);
 
-		dataset.n_attributes   = toshare[0];
-		dataset.n_observations = toshare[1];
-		dataset.n_words		   = toshare[2];
-		dm.n_matrix_lines	   = toshare[3];
+		dataset.n_classes	   = toshare[0];
+		dataset.n_attributes   = toshare[1];
+		dataset.n_observations = toshare[2];
+		dataset.n_words		   = toshare[3];
+		dm.n_matrix_lines	   = toshare[4];
 	}
-
-	dm.steps = steps;
-
-	// Distribute attributes by the processes
-	// Keep them in multiples of N_WORDS_CACHE_LINE words
-	// to maximize cache line usage
-	dm.a_offset
-		= BLOCK_LOW_MULTIPLE(rank, size, dataset.n_words, N_WORDS_CACHE_LINE);
-	dm.a_size
-		= BLOCK_SIZE_MULTIPLE(rank, size, dataset.n_words, N_WORDS_CACHE_LINE);
 
 	if (rank == 0)
 	{
 		fprintf(stdout, " - Finished broadcasting attributes\n");
+		TICK;
+	}
+
+	if (rank == 0)
+	{
+		fprintf(stdout, "- Broadcasting observations per class\n");
+	}
+
+	if (node_rank == 0)
+	{
+		MPI_Bcast(dataset.n_observations_per_class, dataset.n_classes,
+				  MPI_UINT32_T, 0, node_comm);
+	}
+	else
+	{
+		dataset.n_observations_per_class
+			= (uint32_t*) malloc(dataset.n_classes * sizeof(uint32_t));
+		MPI_Bcast(dataset.n_observations_per_class, dataset.n_classes,
+				  MPI_UINT32_T, 0, node_comm);
+	}
+
+	if (rank == 0)
+	{
+		fprintf(stdout, " - Finished broadcasting observations per class\n");
 		TICK;
 	}
 
@@ -446,6 +427,10 @@ int main(int argc, char** argv)
 		printf("- Applying set covering algorithm\n");
 	}
 
+	// Distribute attributes by the processes
+	dm.a_offset = BLOCK_LOW(rank, size, dataset.n_words);
+	dm.a_size	= BLOCK_SIZE(rank, size, dataset.n_words);
+
 	// The covered lines and covered attributes are bit arrays
 
 	/**
@@ -468,47 +453,84 @@ int main(int argc, char** argv)
 
 	/**
 	 * The number of attributes is rounded so we can check all bits during
-	 * the attribute totals calculation
+	 * the attribute totals calculation, avoiding one if in the inner cycle
 	 */
 	uint32_t* attribute_totals
 		= (uint32_t*) calloc(dm.a_size * WORD_BITS, sizeof(uint32_t));
 
 	/**
-	 * Selected attributes aka the solution
+	 * Selected attributes aka the solution, only root needs them
 	 */
 	word_t* selected_attributes = NULL;
-
-	/**
-	 * Only root needs them
-	 */
 	if (rank == 0)
 	{
 		selected_attributes = (word_t*) calloc(dataset.n_words, sizeof(word_t));
 	}
 
+	/***
+	 * Calculate class offsets
+	 */
+	uint32_t* class_offsets
+		= (uint32_t*) malloc(dataset.n_classes * sizeof(uint32_t));
+	uint32_t running_total = 0;
+	for (uint32_t i = 0; i < dataset.n_classes; i++)
+	{
+		class_offsets[i] = running_total;
+		running_total += dataset.n_observations_per_class[i];
+	}
+
 	//*********************************************************/
 	// BUILD INITIAL TOTALS
 	//*********************************************************/
-	// calculate_initial_totals(&dm, &dataset, attribute_totals);
-	for (uint32_t line = 0; line < dm.n_matrix_lines; line++)
+	for (uint32_t c = 0; c < dataset.n_classes - 1; c++)
 	{
-		word_t* la = dataset.data + dm.steps[line].indexA * dataset.n_words
-			+ dm.a_offset;
-		word_t* lb = dataset.data + dm.steps[line].indexB * dataset.n_words
-			+ dm.a_offset;
+		word_t* start_class_a
+			= dataset.data + class_offsets[c] * dataset.n_words + dm.a_offset;
+		word_t* end_class_a = start_class_a
+			+ dataset.n_observations_per_class[c] * dataset.n_words;
 
-		uint32_t c_attribute = 0;
+		word_t* start_class_b = end_class_a;
+		word_t* end_class_b	  = dataset.data
+			+ (dataset.n_observations) * dataset.n_words + dm.a_offset;
 
-		for (uint32_t w = 0; w < dm.a_size; w++)
+		//	printf("\n");
+		//	printf("[%d] start_a: %ld, end_a: %ld, start_b= %ld, end_b= %ld",
+		// rank, 		   start_class_a - dataset.data, end_class_a -
+		// dataset.data, 		   start_class_b - dataset.data, end_class_b -
+		// dataset.data); 	printf("[%d] c: %d, offset: %d, size= %d", rank, c,
+		// dm.a_offset, 		   dm.a_size); 	printf("\n");
+
+		for (word_t* la = start_class_a; la < end_class_a;
+			 la += dataset.n_words)
 		{
-			word_t lxor = la[w] ^ lb[w];
-
-			for (int8_t bit = WORD_BITS - 1; bit >= 0; bit--, c_attribute++)
+			for (word_t* lb = start_class_b; lb < end_class_b;
+				 lb += dataset.n_words)
 			{
-				attribute_totals[c_attribute] += BIT_CHECK(lxor, bit);
+				uint32_t c_attribute = 0;
+
+				//	printf("[%d] %ld x %ld\n", rank, la - dataset.data, lb -
+				// dataset.data);
+
+				for (uint32_t w = 0; w < dm.a_size; w++)
+				{
+					word_t lxor = la[w] ^ lb[w];
+
+					for (int8_t bit = WORD_BITS - 1; bit >= 0;
+						 bit--, c_attribute++)
+					{
+						attribute_totals[c_attribute] += BIT_CHECK(lxor, bit);
+					}
+				}
 			}
 		}
 	}
+
+	//	printf("FINAL ATTR TOTALS:\n");
+	//	for (unsigned long i = 0; i < dataset.n_attributes; i++)
+	//	{
+	//		printf("i: %ld, %d\n", i, attribute_totals[i]);
+	//	}
+
 	//*********************************************************/
 	// END BUILD INITIAL TOTALS
 	//*********************************************************/
@@ -528,6 +550,11 @@ int main(int argc, char** argv)
 
 	// create the user-op
 	MPI_Op_create(MPI_get_best_attribute, true, &myOp);
+
+	/**
+	 * Number of covered lines so far
+	 */
+	uint32_t n_covered_lines = 0;
 
 	while (true)
 	{
@@ -554,7 +581,7 @@ int main(int argc, char** argv)
 		//	}
 
 		// Reset best
-		best_attribute_t best_max = { .max = 0, .attribute = -1 };
+		best_attribute_t best_max = { .n_covered_lines = 0, .attribute = -1 };
 
 		// At this point, the answer resides on best_max
 		MPI_Allreduce(&local_max, &best_max, 1, ctype, myOp, comm);
@@ -572,8 +599,8 @@ int main(int argc, char** argv)
 		 */
 		if (rank == 0)
 		{
-			printf(" - Selected attribute #%ld, covers %ld lines ",
-				   best_max.attribute, best_max.max);
+			printf(" - Selected attribute #%ld, covers %lu lines ",
+				   best_max.attribute, best_max.n_covered_lines);
 
 			TOCK(stdout);
 			TICK;
@@ -586,6 +613,15 @@ int main(int argc, char** argv)
 
 			// Mark best attribute as selected
 			BIT_SET(selected_attributes[best_word], best_bit);
+		}
+
+		// Update number of covered lines
+		n_covered_lines += best_max.n_covered_lines;
+
+		// If we have everything covered goto show_solution
+		if (n_covered_lines == dm.n_matrix_lines)
+		{
+			goto show_solution;
 		}
 
 		/**
@@ -603,24 +639,40 @@ int main(int argc, char** argv)
 			//***********************************************************/
 			// BUILD BEST COLUMN
 			//***********************************************************/
-			for (uint32_t line = 0; line < dm.n_matrix_lines; line++)
+			uint32_t line = 0;
+			for (uint32_t c = 0; c < dataset.n_classes - 1; c++)
 			{
-				word_t* la = dataset.data
-					+ dm.steps[line].indexA * dataset.n_words + best_word;
-				word_t* lb = dataset.data
-					+ dm.steps[line].indexB * dataset.n_words + best_word;
+				word_t* start_class_a = dataset.data
+					+ class_offsets[c] * dataset.n_words + best_word;
+				word_t* end_class_a = start_class_a
+					+ dataset.n_observations_per_class[c] * dataset.n_words;
 
-				word_t lxor = *la ^ *lb;
+				word_t* start_class_b = end_class_a;
+				word_t* end_class_b	  = dataset.data
+					+ (dataset.n_observations) * dataset.n_words + best_word;
 
-				if (BIT_CHECK(lxor, best_bit))
+				for (word_t* la = start_class_a; la < end_class_a;
+					 la += dataset.n_words)
 				{
-					// Where to save it
-					uint32_t current_word = line / WORD_BITS;
+					for (word_t* lb = start_class_b; lb < end_class_b;
+						 lb += dataset.n_words)
+					{
+						word_t lxor = *la ^ *lb;
 
-					// Which bit?
-					uint32_t current_bit = WORD_BITS - line % WORD_BITS - 1;
+						if (BIT_CHECK(lxor, best_bit))
+						{
+							// Where to save it
+							uint32_t current_word = line / WORD_BITS;
 
-					BIT_SET(best_column[current_word], current_bit);
+							// Which bit?
+							uint32_t current_bit
+								= WORD_BITS - line % WORD_BITS - 1;
+
+							BIT_SET(best_column[current_word], current_bit);
+						}
+
+						line++;
+					}
 				}
 			}
 			//***********************************************************/
@@ -638,82 +690,63 @@ int main(int argc, char** argv)
 		 * Subtract the contribution of the lines covered by the best attribute
 		 * from the totals
 		 */
-		for (uint32_t line = 0; line < dm.n_matrix_lines; line++)
+		uint32_t line = 0;
+		for (uint32_t c = 0; c < dataset.n_classes - 1; c++)
 		{
-			// Is this line already covered?
-			// Yes: skip
-			// No. Is it covered by the best attribute?
-			// Yes: add
-			// No: skip
-			uint32_t current_word = line / WORD_BITS;
-			uint8_t current_bit	  = WORD_BITS - line % WORD_BITS - 1;
+			word_t* start_class_a = dataset.data
+				+ class_offsets[c] * dataset.n_words + dm.a_offset;
+			word_t* end_class_a = start_class_a
+				+ dataset.n_observations_per_class[c] * dataset.n_words;
 
-			// Is this line already covered?
-			if (BIT_CHECK(covered_lines[current_word], current_bit))
+			word_t* start_class_b = end_class_a;
+			word_t* end_class_b	  = dataset.data
+				+ (dataset.n_observations) * dataset.n_words + dm.a_offset;
+
+			for (word_t* la = start_class_a; la < end_class_a;
+				 la += dataset.n_words)
 			{
-				// This line is already covered: skip
-				continue;
-			}
-
-			// Is this line covered by the best attribute?
-			if (!BIT_CHECK(best_column[current_word], current_bit))
-			{
-				// This line is NOT covered: skip
-				continue;
-			}
-
-			// This line was uncovered, but is covered now
-			// Calculate attributes totals
-			word_t* la = dataset.data + dm.steps[line].indexA * dataset.n_words
-				+ dm.a_offset;
-			word_t* lb = dataset.data + dm.steps[line].indexB * dataset.n_words
-				+ dm.a_offset;
-
-			uint32_t c_attribute = 0;
-
-			for (uint32_t w = 0; w < dm.a_size; w++)
-			{
-				word_t lxor = la[w] ^ lb[w];
-
-				for (int8_t bit = WORD_BITS - 1; bit >= 0; bit--, c_attribute++)
+				for (word_t* lb = start_class_b; lb < end_class_b;
+					 lb += dataset.n_words, line++)
 				{
-					attribute_totals[c_attribute] -= BIT_CHECK(lxor, bit);
-				}
+					// Is this line already covered?
+					// Yes: skip
+					// No. Is it covered by the best attribute?
+					// Yes: add
+					// No: skip
+					uint32_t current_word = line / WORD_BITS;
+					uint8_t current_bit	  = WORD_BITS - line % WORD_BITS - 1;
 
-				//				__m256i lxor_ = _mm256_set1_epi64x(lxor);
-				//				__m256i zeros = _mm256_set1_epi64x(0);
-				//
-				//				for (int8_t bit = WORD_BITS, pos = 0; bit > 0;
-				//					 bit -= 4, pos += 4, c_attribute += 4)
-				//				{
-				//					__m256i mask = _mm256_set_epi64x(
-				//						AND_MASK_TABLE[bit - 1],
-				// AND_MASK_TABLE[bit
-				//- 2], 						AND_MASK_TABLE[bit - 3],
-				// AND_MASK_TABLE[bit - 4]);
-				//					__m256i attr_totals = _mm256_set_epi64x(
-				//						attribute_totals[pos],
-				// attribute_totals[pos
-				//+ 1], 						attribute_totals[pos + 2],
-				// attribute_totals[pos + 3]);
-				//
-				//					__m256i a	 = _mm256_and_si256(lxor_,
-				// mask);
-				//					__m256i ones = _mm256_cmpgt_epi64(a, zeros);
-				//
-				//					attr_totals = _mm256_sub_epi64(attr_totals,
-				// ones);
-				//
-				//					attribute_totals[c_attribute + 0] =
-				// attr_totals[0]; 					attribute_totals[c_attribute
-				// + 1]
-				// =
-				// attr_totals[1]; 					attribute_totals[c_attribute
-				// + 2]
-				// =
-				// attr_totals[2]; 					attribute_totals[c_attribute
-				// + 3] = attr_totals[3];
-				//				}
+					// Is this line already covered?
+					if (BIT_CHECK(covered_lines[current_word], current_bit))
+					{
+						// This line is already covered: skip
+						continue;
+					}
+
+					// Is this line covered by the best attribute?
+					if (!BIT_CHECK(best_column[current_word], current_bit))
+					{
+						// This line is NOT covered: skip
+						continue;
+					}
+
+					uint32_t c_attribute = 0;
+
+					//	printf("[%d] %ld x %ld\n", rank, la - dataset.data, lb -
+					// dataset.data);
+
+					for (uint32_t w = 0; w < dm.a_size; w++)
+					{
+						word_t lxor = la[w] ^ lb[w];
+
+						for (int8_t bit = WORD_BITS - 1; bit >= 0;
+							 bit--, c_attribute++)
+						{
+							attribute_totals[c_attribute]
+								-= BIT_CHECK(lxor, bit);
+						}
+					}
+				}
 			}
 		}
 		//***************************************************************/
@@ -756,23 +789,17 @@ show_solution:
 	{
 		fprintf(stdout, "All done! ");
 
-		clock_gettime(CLOCK_MONOTONIC_RAW, &main_tock);
-		fprintf(stdout, "[%0.3fs]\n",
-				(main_tock.tv_nsec - main_tick.tv_nsec) / 1000000000.0
-					+ (main_tock.tv_sec - main_tick.tv_sec));
+		main_tock = time(0);
+		fprintf(stdout, "[%lds]\n", main_tock - main_tick);
 	}
 
 	//  wait for everyone
 	MPI_Barrier(comm);
 
-	MPI_Win_free(&win_shared_steps);
 	MPI_Win_free(&win_shared_dset);
 
 	dataset.data = NULL;
-	dm.steps	 = NULL;
-
 	free_dataset(&dataset);
-	free_dm(&dm);
 
 	free(attribute_totals);
 	free(best_column);
